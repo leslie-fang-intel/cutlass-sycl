@@ -135,6 +135,138 @@ struct Options {
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
+template <
+  typename TA, typename TB,
+  typename TC, typename TD,
+  typename TiledMma, typename TileShape, int kTileM, int kTileN, int kTileK>
+void my_kernel(
+  const TA* ptr_A,
+  const TB* ptr_B,
+  const TC* ptr_C,
+  TD* ptr_D,
+  int M,
+  int N,
+  int K) {
+  // A: size: (M, K) stride: (K, 1)
+  // B: size: (N, K) stride: (1, N)
+  // D: size: (M, N) stride: (N, 1)
+  
+  TiledMma tiled_mma;
+
+  cute::Tensor A = cute::make_tensor(cute::make_gmem_ptr(ptr_A), cute::make_shape(M, K), cute::make_stride(K, cute::Int<1>{}));
+  cute::Tensor B = cute::make_tensor(cute::make_gmem_ptr(ptr_B), cute::make_shape(N, K), cute::make_stride(cute::Int<1>{}, N));  // Column Major
+  cute::Tensor D = cute::make_tensor(cute::make_gmem_ptr(ptr_D), cute::make_shape(M, N), cute::make_stride(N, cute::Int<1>{}));
+
+  int ix = BlockIdxX();  // N 维度，因为 定义 grid(grid_n, grid_m) 
+  int iy = BlockIdxY();  // M 维度
+
+  // gA(kTileM, kTileK, num_tile_k)
+  // gB(kTileN, kTileK, num_tile_k)
+  // gC(kTileM, kTileN) 
+  cute::Tensor gA = cute::local_tile(A, cute::make_tile(cute::Int<kTileM>{}, cute::Int<kTileK>{}), cute::make_coord(iy, cute::_));
+  cute::Tensor gB = cute::local_tile(B, cute::make_tile(cute::Int<kTileN>{}, cute::Int<kTileK>{}), cute::make_coord(ix, cute::_));
+  cute::Tensor gD = cute::local_tile(D, cute::make_tile(cute::Int<kTileM>{}, cute::Int<kTileN>{}), cute::make_coord(iy, ix));
+
+  auto thr_mma = tiled_mma.get_slice(int(ThreadIdxX()));
+
+  auto tAgA = thr_mma.partition_A(gA);  // (MMA, MMA_M, MMA_K, num_tile_k)
+  auto tBgB = thr_mma.partition_B(gB);  // (MMA, MMA_N, MMA_K, num_tile_k)
+  auto tDgD = thr_mma.partition_C(gD);  // (MMA, MMA_M, MMA_N)
+
+  // 返回寄存器声明
+  auto tArA = thr_mma.partition_fragment_A(gA(cute::_, cute::_, 0));  // (MMA, MMA_M, MMA_K)
+  auto tBrB = thr_mma.partition_fragment_B(gB(cute::_, cute::_, 0));  // (MMA, MMA_N, MMA_K)
+  auto tDrD = thr_mma.partition_fragment_C(gD(cute::_, cute::_));     // (MMA, MMA_M, MMA_N)
+
+  // set to zero
+  cute::clear(tDrD);
+
+  int num_tile_k = cute::size<2>(gA);
+  #pragma unroll
+  for(int itile = 0; itile < num_tile_k; ++itile) {
+    cute::copy(tAgA(cute::_, cute::_, cute::_, itile), tArA);
+    cute::copy(tBgB(cute::_, cute::_, cute::_, itile), tBrB);
+
+    cute::gemm(tiled_mma, tDrD, tArA, tBrB, tDrD);
+  }
+
+  cute::copy(tDrD, tDgD);
+
+  if(cute::thread0()) {
+    printf("---- launch my_kernel ----");
+    printf("\n");
+    printf("---- num_tile_k %d is: ", num_tile_k);
+    printf("\n");
+    print(tiled_mma);
+    printf("\n");
+    print(A);
+    printf("\n");
+    print(B);
+    printf("\n");
+    print(gA);
+    printf("\n");
+    print(gB);
+    printf("\n");
+  }
+
+
+}
+
+template <
+  class Gemm
+>
+void raw_run(const Options& options, typename Gemm::GemmKernel::Arguments const& args) {
+  printf("\n ---- hit the raw run ---- \n");
+  Gemm gemm_op;
+  using GemmKernel = typename Gemm::GemmKernel;
+  using TiledMma = typename GemmKernel::CollectiveMainloop::TiledMma;
+  using TileShape = typename GemmKernel::CollectiveMainloop::WorkgroupTileShape;
+
+  static constexpr auto kTileM = get<0>(TileShape{});
+  static constexpr auto kTileN = get<1>(TileShape{});
+  static constexpr auto kTileK = get<2>(TileShape{});
+  int grid_m = options.m / kTileM;
+  int grid_n = options.n / kTileN;
+  int grid_l = options.l;
+  if (grid_l != 1) {
+    std::cout<<"---- to support the case when grid_l not equal to 1 ----"<<std::endl;
+    std::exit(1);
+  }
+  dim3 grid(grid_n, grid_m, grid_l);
+  dim3 const block = dim3(size(TiledMma{}));
+
+  // <TODO> Using smem
+  int smem_size = 0;
+  sycl::queue q = syclcompat::get_default_queue();
+  
+  // submit kernel
+  // Option 1:
+  // syclcompat::launch<my_kernel>(grid, block, q);
+
+  // Option 2:
+  using EmptyProperties = decltype(sycl::ext::oneapi::experimental::properties());
+  auto kernel_props = syclcompat::experimental::kernel_properties<EmptyProperties>{};
+  syclcompat::experimental::launch_properties launch_props {
+    sycl::ext::oneapi::experimental::work_group_scratch_size(smem_size),
+  };
+  syclcompat::experimental::launch_policy policy{
+    grid, block, launch_props, kernel_props
+  };
+
+  // auto params = gemm_op.params();
+
+  syclcompat::experimental::launch<
+    my_kernel<
+      typename Gemm::ElementA, typename Gemm::ElementB,
+      typename Gemm::ElementC, typename Gemm::ElementD,
+      TiledMma, TileShape, kTileM, kTileN, kTileK
+    >
+  >(
+    policy, q, args.mainloop.ptr_A, args.mainloop.ptr_B, args.epilogue.ptr_C, args.epilogue.ptr_D,
+    options.m, options.n, options.k
+  );
+
+}
 
 template <
   class Gemm
@@ -216,6 +348,19 @@ struct ExampleRunner {
     // Check if output from CUTLASS kernel and reference kernel are equal or not
     bool passed = cutlass::reference::device::BlockCompareEqual(
       block_ref_D.get(), block_D.get(), block_D.size());
+    
+    // for (int offset = 0; offset < 16; offset ++) {
+    //   float d_ref_val;
+    //   float* d_ref_ptr = static_cast<float*>(block_ref_D.get()) + offset;
+    //   syclcompat::memcpy(&d_ref_val, d_ref_ptr, sizeof(float));
+    //   std::cout<<"offset is: "<<offset<<" d_ref_val is: "<<d_ref_val<<std::endl;
+
+    //   float d_val;
+    //   float* d_ptr = static_cast<float*>(block_D.get()) + offset;
+    //   syclcompat::memcpy(&d_val, d_ptr, sizeof(float));
+    //   std::cout<<"offset is: "<<offset<<" d_val is: "<<d_val<<std::endl;
+    // }
+
 
     return passed;
   }
@@ -230,6 +375,13 @@ struct ExampleRunner {
     stride_B = cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, L));
     stride_C = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, L));
     stride_D = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(M, N, L));
+
+    // printf("\n ---- print stideA ---- \n");
+    // print(stride_A);
+    // printf("\n ---- print stideA ---- \n");
+    // print(stride_B);
+    // printf("\n ---- print stideA ---- \n");
+    // print(stride_D);
 
     block_A.reset(static_cast<std::size_t>(M) * K * L);
     block_B.reset(static_cast<std::size_t>(K) * N * L);
@@ -268,7 +420,9 @@ struct ExampleRunner {
     CUTLASS_CHECK(gemm_op.initialize(arguments, workspace.get()));
 
     // Run the GEMM
+    
     CUTLASS_CHECK(gemm_op.run());
+    raw_run<Gemm>(options, arguments);
 
     syclcompat::wait();
 
@@ -278,19 +432,19 @@ struct ExampleRunner {
 
     if(!passed) return cutlass::Status::kErrorInternal;
 
-    if (options.iterations > 0) {
-      GPU_Clock timer;
-      timer.start();
-      for (int i = 0; i < options.iterations; ++i) {
-        gemm_op.run();
-      }
-      syclcompat::wait();
+    // if (options.iterations > 0) {
+    //   GPU_Clock timer;
+    //   timer.start();
+    //   for (int i = 0; i < options.iterations; ++i) {
+    //     gemm_op.run();
+    //   }
+    //   syclcompat::wait();
 
-      float cute_time = timer.seconds() / options.iterations;
-      double tflops = (2.0 * options.m * options.n * options.k * options.l) * 1e-12;
-      std::cout << "Problem Size: " << options.m << 'x' << options.n << 'x' << options.k << 'x' << options.l << std::endl;
-      printf("Cutlass GEMM Performance:     [%4.3f]TFlop/s  (%6.4f)ms\n", tflops / cute_time, cute_time*1000);
-    }
+    //   float cute_time = timer.seconds() / options.iterations;
+    //   double tflops = (2.0 * options.m * options.n * options.k * options.l) * 1e-12;
+    //   std::cout << "Problem Size: " << options.m << 'x' << options.n << 'x' << options.k << 'x' << options.l << std::endl;
+    //   printf("Cutlass GEMM Performance:     [%4.3f]TFlop/s  (%6.4f)ms\n", tflops / cute_time, cute_time*1000);
+    // }
 
     return cutlass::Status::kSuccess;
   }
@@ -364,6 +518,12 @@ int main(int argc, const char** argv)
   using TiledMma =                    // M=8,N=16,K=16, D=f32,A=bf16,B=bf16,C=f32
       typename TiledMMAHelper<MMA_Atom<XE_8x16x16_F32BF16BF16F32_TT>, Layout<TileShape>,
                                     Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>>::TiledMMA;
+
+
+  // using MMA_fp32 = decltype(make_tiled_mma(XE_8x16x16_F32BF16BF16F32_TT{}, 
+  //                     make_layout(cute::Shape<cute::_8, cute::_4, cute::_1>{}), // thr layout
+  //                     cute::Tile<cute::_256, cute::_256, cute::_32>{})); // permutation
+
 
   // For Intel PVC, PipelineStages defines how many k-blocks ahead to prefetch from A and B.
   constexpr int PipelineStages = 2;

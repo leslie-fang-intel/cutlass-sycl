@@ -275,8 +275,24 @@ public:
     Tensor gA = local_tile(mA_mkl, select<0,2>(blk_shape), make_coord(m_coord,_,l_coord));
     Tensor gB = local_tile(mB_nkl, select<1,2>(blk_shape), make_coord(n_coord,_,l_coord));
 
+
     // Allocate the tiled_mma and the accumulators for the (M,N) subgroup_shape
     TiledMma tiled_mma;
+
+    if(cute::thread0()) {
+      print("\n");
+      print(tiled_mma);
+      print("\n");
+      printf("\n ---- mA_mkl ---- \n");
+      print(mA_mkl);
+      printf("\n ---- mB_nkl ---- \n");
+      print(mB_nkl);
+      print("\n");
+      print(gA);
+      print("\n");
+      print(gB);
+      print("\n");
+    }
 
     Tensor accumulators = partition_fragment_C(tiled_mma, take<0,2>(blk_shape)); 
     clear(accumulators);
