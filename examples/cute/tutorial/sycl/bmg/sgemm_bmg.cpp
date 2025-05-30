@@ -408,6 +408,24 @@ int main(int argc, char** argv)
   for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( 2*(rand() / double(RAND_MAX)) - 1 );
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<TC>(-1);
 
+  // std::cout<<"---- print matrix A"<<std::endl;
+  // for (int i = 0; i < m; ++i) {
+  //   std::cout<<"\n"<<std::endl;
+  //   for (int j = 0; j < k; ++j) {
+  //     h_A[i*k + j] = static_cast<TA>( i*k + j );
+  //     std::cout<<h_A[i*k + j]<<",\t";
+  //   }
+  // }
+
+  // std::cout<<"---- print matrix B"<<std::endl;
+  // for (int i = 0; i < n; ++i) {
+  //   std::cout<<"\n"<<std::endl;
+  //   for (int j = 0; j < k; ++j) {
+  //     h_B[i*k + j] = static_cast<TA>( i*k + j );
+  //     std::cout<<h_B[i*k + j]<<",\t";
+  //   }
+  // }
+
   auto d_A = syclcompat::malloc<TA>(m*k);
   auto d_B = syclcompat::malloc<TB>(k*n);
   auto d_C = syclcompat::malloc<TC>(m*n);
@@ -448,18 +466,32 @@ int main(int argc, char** argv)
        d_C, ldC);
   syclcompat::wait_and_throw();
 
-  // Timing iterations
-  timer.start();
-  for (int i = 0; i < timing_iterations; ++i) {
-    gemm(transA, transB, m, n, k,
-         alpha,
-         d_A, ldA,
-         d_B, ldB,
-         beta,
-         d_C, ldC);
-  }
-  double cute_time = timer.seconds() / timing_iterations;
-  printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
+  // Copy data back to host
+  syclcompat::memcpy<TC>(h_C.data(), d_C, m*n);
+  syclcompat::wait_and_throw();
 
+  // Matrix C should be M major
+  std::cout<<"\n ---- print matrix C"<<std::endl;
+  for(int row=0; row<m; row++) {
+    std::cout<<"\n"<<std::endl;
+    for(int column=0; column<n; column++) {
+      std::cout<<static_cast<TC>(h_C[column * m + row ])<<",\t";
+    }
+  }
+
+  // // Timing iterations
+  // timer.start();
+  // for (int i = 0; i < timing_iterations; ++i) {
+  //   gemm(transA, transB, m, n, k,
+  //        alpha,
+  //        d_A, ldA,
+  //        d_B, ldB,
+  //        beta,
+  //        d_C, ldC);
+  // }
+  // double cute_time = timer.seconds() / timing_iterations;
+  // printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
+
+  printf("\n ---- finished the testing ---- \n");
   return 0;
 }
