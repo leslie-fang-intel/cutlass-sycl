@@ -76,8 +76,19 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   // Get the appropriate blocks for this thread block
   auto cta_coord = make_coord(syclcompat::work_group_id::x(), syclcompat::work_group_id::y(), 0);  // (m,n,k)
   Tensor gA = local_tile(mA_coord, cta_tiler, cta_coord, Step<_1, X,_1>{});  // (BLK_M,BLK_K,k)
-  Tensor gB = local_tile(mB_coord, cta_tiler, cta_coord, Step< X,_1,_1>{});  // (BLK_N,BLK_K,k)
+  // Tensor gB = local_tile(mB_coord, cta_tiler, cta_coord, Step< X,_1,_1>{});  // (BLK_N,BLK_K,k)
   Tensor gC = local_tile(mC_coord, cta_tiler, cta_coord, Step<_1,_1, X>{});  // (BLK_M,BLK_N)
+
+  Tensor gB = local_tile(mB_coord, select<1,2>(cta_tiler), make_coord(BlockIdxY(),_,BlockIdxZ()));
+
+
+
+  if(thread0()) {
+    print("mB_coord \n");
+    print(mB_coord);
+    print("\n gB \n");
+    print(gB);
+  }
 
   //
   // Define A/B partitioning and C accumulators
@@ -93,6 +104,12 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   Tensor tCgA = thr_mma.partition_A(gA);
   Tensor tCgB = thr_mma.partition_B(gB);
   Tensor tCgC = thr_mma.partition_C(gC);
+
+  if(thread0()) {
+    print("\n");
+    print(tCgB);
+    print("\n");
+  }
 
   Tensor tCrA = make_tensor<TA>(make_fragment_layout(copy_a, tCgA(_,_,_,0).shape()));
   Tensor tCrB = make_tensor<TB>(make_fragment_layout(copy_b, tCgB(_,_,_,0).shape()));
@@ -177,6 +194,14 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
     barrier_arrive(barrier_scope);
     // Copy gmem to rmem for the first k_tile
     copy(copy_a, tAgA(_,_,_,k_tile), tArA);
+
+    // if(thread0()) {
+    //     print(" copy_b : "); print(  copy_b); print("\n");
+    //     print("---- tBgB 0000 \n");
+    //     print_tensor(tBgB);
+    //     print("\n");
+    // }
+
     copy(copy_b, tBgB(_,_,_,k_tile), tBrB);
 
     if (prefetch_k < k_tile_count) {
@@ -189,15 +214,26 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
 
     if(thread0()) {
     // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {        
+        // CUTE_UNROLL
+        // for (int i = 0; i < cute::size(tCrA); ++i) {
+        //     cute::print("thread 0, tCrA item %d, val is: %f \n", i, static_cast<float>(tCrA(i)));
+        // }
+
+        // print(" copy_b : "); print(  copy_b); print("\n");
+        // print("---- tBgB 0000 \n");
+        // print_tensor(tBgB);
+        // print("\n");
+
         CUTE_UNROLL
-        for (int i = 0; i < cute::size(tCrA); ++i) {
-            cute::print("thread 0, tCrA item %d, val is: %f \n", i, static_cast<float>(tCrA(i)));
+        for (int i = 0; i < cute::size(tCrB); ++i) {
+            cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
         }
 
         // CUTE_UNROLL
-        // for (int i = 0; i < cute::size(tCrB); ++i) {
-        //     cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
+        // for (int i = 0; i < cute::size(tBrB); ++i) {
+        //     cute::print("thread 0, tBrB item %d, val is: %f \n", i, static_cast<float>(tBrB(i)));
         // }
+
     }
 
   }
@@ -362,6 +398,82 @@ gemm_tn(int m, int n, int k,
 template <class TA, class TB, class TC,
           class Alpha, class Beta>
 void
+gemm_tt(int m, int n, int k,
+        Alpha alpha,
+        TA const* A, int ldA,
+        TB const* B, int ldB,
+        Beta beta,
+        TC      * C, int ldC)
+{
+
+  std::cout<<"---- hit the gemm_tt ----"<<std::endl;
+
+  using namespace cute;
+
+  // Define shapes (dynamic)
+  auto M = int(m);
+  auto N = int(n);
+  auto K = int(k);
+  auto L = int(1);
+  auto prob_shape = make_shape(M, N, K, L);                     // (M, N, K, L)
+
+  // Define NT strides (mixed)
+  auto dA = make_stride(ldA, Int<1>{});                      // (dM, dK)
+  auto dB = make_stride(Int<1>{}, ldB);                      // (dN, dK)
+  auto dC = make_stride(ldC, Int<1>{});                      // (dM, dN)
+
+  // Define CTA tile sizes (static)
+  auto bM = Int<256>{};
+  auto bN = Int<256>{};
+  auto bK = Int< 32>{};
+  auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
+  auto bP = Int<2>{};  // Pipeline
+
+  // Define the thread layouts (static)
+
+  TiledCopy copyA = make_tiled_copy(Copy_Atom<Copy_Traits<XE_2D_U16x32x32_LD_N, decltype(dA)>, TA>{},
+                                    Layout<Shape<_1,_16>>{}, // Thr layout 1x16 k-major
+                                    Layout<Shape<_32,_2>>{});              // Val layout  32x2
+  TiledCopy copyB = make_tiled_copy(Copy_Atom<Copy_Traits<XE_2D_U16x32x32_LD_V, decltype(dB)>, TB>{},
+                                    Layout<Shape<_1,_16>>{}, // Thr layout 1x16 n-major
+                                    Layout<Shape<_32,_2>>{});              // Val layout  16x1
+  TiledCopy copyC = make_tiled_copy(Copy_Atom<Copy_Traits<XE_2D_U32x8x16_ST_N, decltype(dC)>, TC>{},
+                                    Layout<Shape<_1,_16>>{}, // Thr layout 1x16 n-major
+                                    Layout<Shape<_8,_1>>{});              // Val layout  8x1
+
+  TiledMMA mmaC = TiledMMAHelper<MMA_Atom<XE_8x16x16_F32BF16BF16F32_TT>, Layout<decltype(cta_tiler)>,
+                                 Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>>::TiledMMA{};
+
+#if 0
+  print(copyA);
+  print(copyB);
+  print(mmaC);
+#endif
+
+#if 0
+  print_latex(copyA);
+  print_latex(copyB);
+  print_latex(mmaC);
+#endif
+
+  auto dimBlock = syclcompat::dim3(size(mmaC));
+  auto dimGrid  = syclcompat::dim3(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
+  auto event = syclcompat::launch<
+      gemm_device<decltype(prob_shape), decltype(cta_tiler),
+                  TA, decltype(dA), decltype(copyA),
+                  TB, decltype(dB), decltype(copyB),
+                  TC, decltype(dC), decltype(copyC), decltype(mmaC),
+                  Alpha, Beta>>(dimGrid, dimBlock, prob_shape, cta_tiler, bP,
+                    A, dA, copyA,
+                    B, dB, copyB,
+                    C, dC, copyC, mmaC,
+                    alpha, beta);
+  EventManager::getInstance().addEvent(event);
+}
+
+template <class TA, class TB, class TC,
+          class Alpha, class Beta>
+void
 gemm(char transA, char transB, int m, int n, int k,
      Alpha alpha,
      TA const* A, int ldA,
@@ -375,25 +487,28 @@ gemm(char transA, char transB, int m, int n, int k,
   if (transA == 'T' && transB == 'N') {
     return gemm_tn(m, n, k, alpha, A, ldA, B, ldB, beta, C, ldC);
   }
+  if (transA == 'T' && transB == 'T') {
+    return gemm_tt(m, n, k, alpha, A, ldA, B, ldB, beta, C, ldC);
+  }
   assert(false && "Not implemented");
 }
 
 
 int main(int argc, char** argv)
 {
-  int m = 5120;
+  int m = 4;
   if (argc >= 2)
     sscanf(argv[1], "%d", &m);
 
-  int n = 5120;
+  int n = 16;
   if (argc >= 3)
     sscanf(argv[2], "%d", &n);
 
-  int k = 4096;
+  int k = 32;
   if (argc >= 4)
     sscanf(argv[3], "%d", &k);
 
-  char transA = 'N';
+  char transA = 'T';
   if (argc >= 5)
     sscanf(argv[4], "%c", &transA);
 
@@ -418,9 +533,27 @@ int main(int argc, char** argv)
   std::vector<TB> h_B(n*k);
   std::vector<TC> h_C(m*n);
 
-  for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( 2*(rand() / double(RAND_MAX)) - 1 );
-  for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( 2*(rand() / double(RAND_MAX)) - 1 );
+  // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( 2*(rand() / double(RAND_MAX)) - 1 );
+  // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( 2*(rand() / double(RAND_MAX)) - 1 );
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<TC>(-1);
+
+  std::cout<<"\n ---- print matrix A"<<std::endl;
+  for (int i = 0; i < m; ++i) {
+    std::cout<<"\n"<<std::endl;
+    for (int j = 0; j < k; ++j) {
+      h_A[i*k + j] = static_cast<TA>( i*k + j );
+      std::cout<<h_A[i*k + j]<<",\t";
+    }
+  }
+
+  std::cout<<"\n ---- print matrix B"<<std::endl;
+  for (int i = 0; i < k; ++i) {
+    std::cout<<"\n"<<std::endl;
+    for (int j = 0; j < n; ++j) {
+      h_B[i*n + j] = static_cast<TB>( i*n + j );
+      std::cout<<h_B[i*n + j]<<",\t";
+    }
+  }
 
   auto d_A = syclcompat::malloc<TA>(m*k);
   auto d_B = syclcompat::malloc<TB>(k*n);
@@ -453,6 +586,11 @@ int main(int argc, char** argv)
     assert(false);
   }
 
+  if (transA == 'T' && transB == 'T') {
+   // <TODO> what's about NT and TN
+   ldC = n;
+  }
+
   // Run once
   gemm(transA, transB, m, n, k,
        alpha,
@@ -462,18 +600,29 @@ int main(int argc, char** argv)
        d_C, ldC);
   syclcompat::wait_and_throw();
 
-  // Timing iterations
-  timer.start();
-  for (int i = 0; i < timing_iterations; ++i) {
-    gemm(transA, transB, m, n, k,
-         alpha,
-         d_A, ldA,
-         d_B, ldB,
-         beta,
-         d_C, ldC);
+
+  syclcompat::memcpy<TC>(h_C.data(), d_C, m*n);
+  syclcompat::wait_and_throw();
+  std::cout<<"\n ---- print matrix C"<<std::endl;
+  for (int i = 0; i < m; ++i) {
+    std::cout<<"\n"<<std::endl;
+    for (int j = 0; j < n; ++j) {
+      std::cout<<h_C[i*n + j]<<",\t";
+    }
   }
-  double cute_time = timer.seconds() / timing_iterations;
-  printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
+
+//   // Timing iterations
+//   timer.start();
+//   for (int i = 0; i < timing_iterations; ++i) {
+//     gemm(transA, transB, m, n, k,
+//          alpha,
+//          d_A, ldA,
+//          d_B, ldB,
+//          beta,
+//          d_C, ldC);
+//   }
+//   double cute_time = timer.seconds() / timing_iterations;
+//   printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
 
   return 0;
 }
