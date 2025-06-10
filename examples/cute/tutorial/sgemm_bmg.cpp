@@ -166,6 +166,8 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
     print(tiled_mma);
     print("\n gA \n");
     print(gA);
+    print("\n tCgA \n");
+    print(tCgA);
     print("\n");
   }
 
@@ -250,16 +252,19 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
 
   clear(tCrB);
 
-  // if(thread0()) {
-  // // // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {
-  //   print("Before copy_a : "); print(  copy_a); print("\n");
-  //   print("---- tAgA 0000 \n");
-  //   print_tensor(tAgA);
-  //   print("\n");
+  if(thread0()) {
+  // // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {
+    print("Before copy_a : "); print(  copy_a); print("\n");
+    print("\n ---- tAgA \n");
+    print_tensor(tAgA);
+    print("\n");
 
-  //   print("\n k_tile_count is: %d \n", k_tile_count);
+    print("\n k_tile_count is: %d \n", k_tile_count);
 
-  // }
+    print("\n ---- tArA ---- \n");
+    print(tArA);
+    print("\n");
+  }
 
   CUTLASS_PRAGMA_UNROLL
   for (int k_tile = 0; k_tile < k_tile_count; k_tile++, prefetch_k++) {
@@ -271,19 +276,18 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
     cute::gemm(tiled_mma, tCrA, tCrB, tCrC);
     barrier_wait(barrier_scope);
 
-    // if(thread0()) {
-    //     // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {        
-    //     CUTE_UNROLL
-    //     for (int i = 0; i < cute::size(tCrA); ++i) {
-    //         cute::print("thread 0, tCrA item %d, val is: %f \n", i, static_cast<float>(tCrA(i)));
-    //     }
+    if(thread0()) {
+        // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {   
+        CUTE_UNROLL
+        for (int i = 0; i < cute::size(tCrA); ++i) {
+            cute::print("thread 0, tCrA item %d, val is: %f \n", i, static_cast<float>(tCrA(i)));
+        }
 
-    //     CUTE_UNROLL
-    //     for (int i = 0; i < cute::size(tCrB); ++i) {
-    //         cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
-    //     }
-
-    // }
+        CUTE_UNROLL
+        for (int i = 0; i < cute::size(tCrB); ++i) {
+            cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
+        }
+    }
 
   }
 
@@ -318,8 +322,9 @@ gemm_nt(int m, int n, int k,
 
   // Define NT strides (mixed)
   auto dA = make_stride(Int<1>{}, ldA);                      // (dM, dK)
+  // auto dA = make_stride(ldA, Int<1>{});                      // (dM, dK)
   auto dB = make_stride(Int<1>{}, ldB);                      // (dN, dK)
-  auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
+  auto dC = make_stride(ldC, Int<1>{});                      // (dM, dN)
 
   // Define CTA tile sizes (static)
   auto bM = Int<256>{};
@@ -357,16 +362,42 @@ gemm_nt(int m, int n, int k,
 
   auto dimBlock = syclcompat::dim3(size(mmaC));
   auto dimGrid  = syclcompat::dim3(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
-  auto event = syclcompat::launch<
-      gemm_device<decltype(prob_shape), decltype(cta_tiler),
-                  TA, decltype(dA), decltype(copyA),
-                  TB, decltype(dB), decltype(copyB),
-                  TC, decltype(dC), decltype(copyC), decltype(mmaC),
-                  Alpha, Beta>>(dimGrid, dimBlock, prob_shape, cta_tiler, bP,
+  // auto event = syclcompat::launch<
+  //     gemm_device<decltype(prob_shape), decltype(cta_tiler),
+  //                 TA, decltype(dA), decltype(copyA),
+  //                 TB, decltype(dB), decltype(copyB),
+  //                 TC, decltype(dC), decltype(copyC), decltype(mmaC),
+  //                 Alpha, Beta>>(dimGrid, dimBlock, prob_shape, cta_tiler, bP,
+  //                   A, dA, copyA,
+  //                   B, dB, copyB,
+  //                   C, dC, copyC, mmaC,
+  //                   alpha, beta);
+
+  constexpr int SubgroupSize = 16;
+  constexpr int smem_size = 0;
+  auto kernel_props = [] {
+    return syclcompat::experimental::kernel_properties{
+      sycl::ext::oneapi::experimental::sub_group_size<SubgroupSize>
+    };
+  }();
+  syclcompat::experimental::launch_properties launch_props {
+    sycl::ext::oneapi::experimental::work_group_scratch_size(smem_size),
+  };
+  syclcompat::experimental::launch_policy policy{
+    dimGrid, dimBlock, launch_props, kernel_props
+  };
+  auto event = syclcompat::experimental::launch<
+    gemm_device<decltype(prob_shape), decltype(cta_tiler),
+                TA, decltype(dA), decltype(copyA),
+                TB, decltype(dB), decltype(copyB),
+                TC, decltype(dC), decltype(copyC), decltype(mmaC),
+                Alpha, Beta>>(policy, prob_shape, cta_tiler, bP,
                     A, dA, copyA,
                     B, dB, copyB,
                     C, dC, copyC, mmaC,
                     alpha, beta);
+
+
   EventManager::getInstance().addEvent(event);
 }
 
@@ -579,19 +610,19 @@ gemm(char transA, char transB, int m, int n, int k,
 
 int main(int argc, char** argv)
 {
-  int m = 8192;
+  int m = 4;
   if (argc >= 2)
     sscanf(argv[1], "%d", &m);
 
-  int n = 8192;
+  int n = 16;
   if (argc >= 3)
     sscanf(argv[2], "%d", &n);
 
-  int k = 8192;
+  int k = 32;
   if (argc >= 4)
     sscanf(argv[3], "%d", &k);
 
-  char transA = 'T';
+  char transA = 'N';
   if (argc >= 5)
     sscanf(argv[4], "%c", &transA);
 
@@ -619,27 +650,41 @@ int main(int argc, char** argv)
   // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( 2*(rand() / double(RAND_MAX)) - 1 );
   // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( 2*(rand() / double(RAND_MAX)) - 1 );
   
-  for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( (rand()%21) - 10 );
-  for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( (rand()%21) - 10 );
+  // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( (rand()%21) - 10 );
+  // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( (rand()%21) - 10 );
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<TC>(-1);
 
-  // std::cout<<"\n ---- print matrix A"<<std::endl;
-  // for (int i = 0; i < m; ++i) {
-  //   std::cout<<"\n"<<std::endl;
-  //   for (int j = 0; j < k; ++j) {
-  //     h_A[i*k + j] = static_cast<TA>( i*k + j );
-  //     std::cout<<h_A[i*k + j]<<",\t";
-  //   }
-  // }
+  std::cout<<"\n ---- print matrix A"<<std::endl;
+  if (transA == 'N') {
+    // h_A[i*k + j] = static_cast<TA>( a_val );
+    int a_val = 0;
+    for (int i = 0; i < m; ++i) {
+      std::cout<<"\n"<<std::endl;
+      for (int j = 0; j < k; ++j) {
+        h_A[j*m + i] = static_cast<TA>(a_val);
+        std::cout<<h_A[j*m + i]<<",\t";
+        ++a_val;
+      }
+    }
+  } else {
+    for (int i = 0; i < m; ++i) {
+      std::cout<<"\n"<<std::endl;
+      for (int j = 0; j < k; ++j) {
+        h_A[i*k + j] = static_cast<TA>(i*k + j);
+        std::cout<<h_A[i*k + j]<<",\t";
+      }
+    }
+  }
 
-  // std::cout<<"\n ---- print matrix B"<<std::endl;
-  // for (int i = 0; i < k; ++i) {
-  //   std::cout<<"\n"<<std::endl;
-  //   for (int j = 0; j < n; ++j) {
-  //     h_B[i*n + j] = static_cast<TB>( i*n + j );
-  //     std::cout<<h_B[i*n + j]<<",\t";
-  //   }
-  // }
+
+  std::cout<<"\n ---- print matrix B"<<std::endl;
+  for (int i = 0; i < k; ++i) {
+    std::cout<<"\n"<<std::endl;
+    for (int j = 0; j < n; ++j) {
+      h_B[i*n + j] = static_cast<TB>( i*n + j );
+      std::cout<<h_B[i*n + j]<<",\t";
+    }
+  }
 
   auto d_A = syclcompat::malloc<TA>(m*k);
   auto d_B = syclcompat::malloc<TB>(k*n);
@@ -672,7 +717,7 @@ int main(int argc, char** argv)
     assert(false);
   }
 
-  if (transA == 'T' && transB == 'T') {
+  if ((transA == 'T' && transB == 'T') || (transA == 'N' && transB == 'T')) {
    // <TODO> what's about NT and TN
    ldC = n;
   }
@@ -686,15 +731,15 @@ int main(int argc, char** argv)
        d_C, ldC);
   syclcompat::wait_and_throw();
 
-  // syclcompat::memcpy<TC>(h_C.data(), d_C, m*n);
-  // syclcompat::wait_and_throw();
-  // std::cout<<"\n ---- print matrix C"<<std::endl;
-  // for (int i = 0; i < m; ++i) {
-  //   std::cout<<"\n"<<std::endl;
-  //   for (int j = 0; j < n; ++j) {
-  //     std::cout<<h_C[i*n + j]<<",\t";
-  //   }
-  // }
+  syclcompat::memcpy<TC>(h_C.data(), d_C, m*n);
+  syclcompat::wait_and_throw();
+  std::cout<<"\n ---- print matrix C"<<std::endl;
+  for (int i = 0; i < m; ++i) {
+    std::cout<<"\n"<<std::endl;
+    for (int j = 0; j < n; ++j) {
+      std::cout<<h_C[i*n + j]<<",\t";
+    }
+  }
 
   bool passed = verify(
     d_A,
