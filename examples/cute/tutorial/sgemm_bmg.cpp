@@ -83,7 +83,7 @@ bool verify(
 
     // Check if output from CUTLASS kernel and reference kernel are equal or not
     bool passed = cutlass::reference::device::BlockCompareEqual(
-      ref_d_C, d_C, m * n * sizeof(float));
+      ref_d_C, d_C, m * n);
 
     std::cout<<"passed is: "<<passed<<std::endl;
 
