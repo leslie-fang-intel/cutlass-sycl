@@ -87,16 +87,17 @@ bool verify(
 
     // std::cout<<"passed is: "<<passed<<std::endl;
 
-    std::vector<float> ref_h_D(m*n);
-    syclcompat::memcpy<float>(ref_h_D.data(), ref_d_C, m*n);
-    syclcompat::wait_and_throw();
-    std::cout<<"\n ---- print matrix ref_h_D"<<std::endl;
-    for (int i = 0; i < m; ++i) {
-      std::cout<<"\n"<<std::endl;
-      for (int j = 0; j < n; ++j) {
-        std::cout<<ref_h_D[i*n + j]<<",\t";
-      }
-    }
+    // std::vector<float> ref_h_D(m*n);
+    // syclcompat::memcpy<float>(ref_h_D.data(), ref_d_C, m*n);
+    // syclcompat::wait_and_throw();
+    // std::cout<<"\n ---- print matrix ref_h_D"<<std::endl;
+    // for (int i = 0; i < m; ++i) {
+    //   std::cout<<"\n"<<std::endl;
+    //   for (int j = 0; j < n; ++j) {
+    //     std::cout<<ref_h_D[i*n + j]<<",\t";
+    //   }
+    // }
+
     return passed;
 }
 
@@ -578,15 +579,15 @@ gemm(char transA, char transB, int m, int n, int k,
 
 int main(int argc, char** argv)
 {
-  int m = 4;
+  int m = 8192;
   if (argc >= 2)
     sscanf(argv[1], "%d", &m);
 
-  int n = 16;
+  int n = 8192;
   if (argc >= 3)
     sscanf(argv[2], "%d", &n);
 
-  int k = 64;
+  int k = 8192;
   if (argc >= 4)
     sscanf(argv[3], "%d", &k);
 
@@ -617,27 +618,28 @@ int main(int argc, char** argv)
 
   // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( 2*(rand() / double(RAND_MAX)) - 1 );
   // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( 2*(rand() / double(RAND_MAX)) - 1 );
-  // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( (rand()%21) - 10 );
-  // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( (rand()%21) - 10 );
+  
+  for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( (rand()%21) - 10 );
+  for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( (rand()%21) - 10 );
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<TC>(-1);
 
-  std::cout<<"\n ---- print matrix A"<<std::endl;
-  for (int i = 0; i < m; ++i) {
-    std::cout<<"\n"<<std::endl;
-    for (int j = 0; j < k; ++j) {
-      h_A[i*k + j] = static_cast<TA>( i*k + j );
-      std::cout<<h_A[i*k + j]<<",\t";
-    }
-  }
+  // std::cout<<"\n ---- print matrix A"<<std::endl;
+  // for (int i = 0; i < m; ++i) {
+  //   std::cout<<"\n"<<std::endl;
+  //   for (int j = 0; j < k; ++j) {
+  //     h_A[i*k + j] = static_cast<TA>( i*k + j );
+  //     std::cout<<h_A[i*k + j]<<",\t";
+  //   }
+  // }
 
-  std::cout<<"\n ---- print matrix B"<<std::endl;
-  for (int i = 0; i < k; ++i) {
-    std::cout<<"\n"<<std::endl;
-    for (int j = 0; j < n; ++j) {
-      h_B[i*n + j] = static_cast<TB>( i*n + j );
-      std::cout<<h_B[i*n + j]<<",\t";
-    }
-  }
+  // std::cout<<"\n ---- print matrix B"<<std::endl;
+  // for (int i = 0; i < k; ++i) {
+  //   std::cout<<"\n"<<std::endl;
+  //   for (int j = 0; j < n; ++j) {
+  //     h_B[i*n + j] = static_cast<TB>( i*n + j );
+  //     std::cout<<h_B[i*n + j]<<",\t";
+  //   }
+  // }
 
   auto d_A = syclcompat::malloc<TA>(m*k);
   auto d_B = syclcompat::malloc<TB>(k*n);
@@ -684,15 +686,15 @@ int main(int argc, char** argv)
        d_C, ldC);
   syclcompat::wait_and_throw();
 
-  syclcompat::memcpy<TC>(h_C.data(), d_C, m*n);
-  syclcompat::wait_and_throw();
-  std::cout<<"\n ---- print matrix C"<<std::endl;
-  for (int i = 0; i < m; ++i) {
-    std::cout<<"\n"<<std::endl;
-    for (int j = 0; j < n; ++j) {
-      std::cout<<h_C[i*n + j]<<",\t";
-    }
-  }
+  // syclcompat::memcpy<TC>(h_C.data(), d_C, m*n);
+  // syclcompat::wait_and_throw();
+  // std::cout<<"\n ---- print matrix C"<<std::endl;
+  // for (int i = 0; i < m; ++i) {
+  //   std::cout<<"\n"<<std::endl;
+  //   for (int j = 0; j < n; ++j) {
+  //     std::cout<<h_C[i*n + j]<<",\t";
+  //   }
+  // }
 
   bool passed = verify(
     d_A,
