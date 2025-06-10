@@ -462,12 +462,36 @@ gemm_tn(int m, int n, int k,
 
   auto dimBlock = syclcompat::dim3(size(mmaC));
   auto dimGrid  = syclcompat::dim3(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
-  auto event = syclcompat::launch<
-      gemm_device<decltype(prob_shape), decltype(cta_tiler),
-                  TA, decltype(dA), decltype(copyA),
-                  TB, decltype(dB), decltype(copyB),
-                  TC, decltype(dC), decltype(copyC), decltype(mmaC),
-                  Alpha, Beta>>(dimGrid, dimBlock, prob_shape, cta_tiler, bP,
+  // auto event = syclcompat::launch<
+  //     gemm_device<decltype(prob_shape), decltype(cta_tiler),
+  //                 TA, decltype(dA), decltype(copyA),
+  //                 TB, decltype(dB), decltype(copyB),
+  //                 TC, decltype(dC), decltype(copyC), decltype(mmaC),
+  //                 Alpha, Beta>>(dimGrid, dimBlock, prob_shape, cta_tiler, bP,
+  //                   A, dA, copyA,
+  //                   B, dB, copyB,
+  //                   C, dC, copyC, mmaC,
+  //                   alpha, beta);
+  // Cutlass only support simd_16
+  constexpr int SubgroupSize = 16;
+  constexpr int smem_size = 0;
+  auto kernel_props = [] {
+    return syclcompat::experimental::kernel_properties{
+      sycl::ext::oneapi::experimental::sub_group_size<SubgroupSize>
+    };
+  }();
+  syclcompat::experimental::launch_properties launch_props {
+    sycl::ext::oneapi::experimental::work_group_scratch_size(smem_size),
+  };
+  syclcompat::experimental::launch_policy policy{
+    dimGrid, dimBlock, launch_props, kernel_props
+  };
+  auto event = syclcompat::experimental::launch<
+    gemm_device<decltype(prob_shape), decltype(cta_tiler),
+                TA, decltype(dA), decltype(copyA),
+                TB, decltype(dB), decltype(copyB),
+                TC, decltype(dC), decltype(copyC), decltype(mmaC),
+                Alpha, Beta>>(policy, prob_shape, cta_tiler, bP,
                     A, dA, copyA,
                     B, dB, copyB,
                     C, dC, copyC, mmaC,
@@ -678,11 +702,24 @@ int main(int argc, char** argv)
 
 
   std::cout<<"\n ---- print matrix B"<<std::endl;
-  for (int i = 0; i < k; ++i) {
-    std::cout<<"\n"<<std::endl;
-    for (int j = 0; j < n; ++j) {
-      h_B[i*n + j] = static_cast<TB>( i*n + j );
-      std::cout<<h_B[i*n + j]<<",\t";
+  if (transA == 'N') {
+    int b_val = 0;
+    for (int i = 0; i < k; ++i) {
+      std::cout<<"\n"<<std::endl;
+      for (int j = 0; j < n; ++j) {
+        h_B[j*k + i] = static_cast<TB>( b_val );
+        std::cout<<h_B[j*k + i]<<",\t";
+        ++b_val;
+      }
+    }
+
+  } else {
+    for (int i = 0; i < k; ++i) {
+      std::cout<<"\n"<<std::endl;
+      for (int j = 0; j < n; ++j) {
+        h_B[i*n + j] = static_cast<TB>( i*n + j );
+        std::cout<<h_B[i*n + j]<<",\t";
+      }
     }
   }
 
@@ -717,7 +754,7 @@ int main(int argc, char** argv)
     assert(false);
   }
 
-  if ((transA == 'T' && transB == 'T') || (transA == 'N' && transB == 'T')) {
+  if ((transA == 'T' && transB == 'T') || (transA == 'N' && transB == 'T') || (transA == 'T' && transB == 'N')) {
    // <TODO> what's about NT and TN
    ldC = n;
   }
