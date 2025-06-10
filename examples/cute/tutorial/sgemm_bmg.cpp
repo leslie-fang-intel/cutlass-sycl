@@ -37,6 +37,68 @@
 #include "cutlass/util/print_error.hpp"
 #include "cutlass/util/sycl_event_manager.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
+#include "cutlass/tensor_ref.h"
+#include "cutlass/util/reference/device/gemm_complex.h"
+#include "cutlass/kernel_hardware_info.h"
+#include "cutlass/util/reference/device/tensor_compare.h"
+
+template <class TA, class TB, class TC,
+          class Alpha, class Beta>
+bool verify(
+  TA const* d_A,
+  TB const* d_B,
+  TC* d_C,
+  int m,
+  int n,
+  int k,
+  Alpha alpha,
+  Beta beta
+) {
+  auto ref_d_C = syclcompat::malloc<TC>(m*n);
+  cutlass::TensorRef ref_A(d_A, cutlass::layout::RowMajor::packed({m, k}));
+  cutlass::TensorRef ref_B(d_B, cutlass::layout::RowMajor::packed({k, n}));
+  cutlass::TensorRef ref_C(ref_d_C, cutlass::layout::RowMajor::packed({m, n}));
+  cutlass::TensorRef ref_D(ref_d_C, cutlass::layout::RowMajor::packed({m, n}));
+
+  cutlass::reference::device::GemmComplex(
+        {m, n, k},
+        alpha,
+        ref_A,
+        cutlass::ComplexTransform::kNone,
+        ref_B,
+        cutlass::ComplexTransform::kNone,
+        beta,
+        ref_C,
+        ref_D,
+        float(0),  // accumulator
+        1,     // batch_count
+        m * k, // batch_stride_A
+        k * n, // batch_stride_B
+        m * n, // batch_stride_C
+        m * n  // batch_stride_D
+      );
+
+    // CUTLASS on SYCL uses the compatibility library syclcompat for e.g. default in-order queue
+    syclcompat::wait();
+
+    // Check if output from CUTLASS kernel and reference kernel are equal or not
+    bool passed = cutlass::reference::device::BlockCompareEqual(
+      ref_d_C, d_C, m * n * sizeof(float));
+
+    std::cout<<"passed is: "<<passed<<std::endl;
+
+    std::vector<float> ref_h_D(m*n);
+    syclcompat::memcpy<float>(ref_h_D.data(), ref_d_C, m*n);
+    syclcompat::wait_and_throw();
+    std::cout<<"\n ---- print matrix ref_h_D"<<std::endl;
+    for (int i = 0; i < m; ++i) {
+      std::cout<<"\n"<<std::endl;
+      for (int j = 0; j < n; ++j) {
+        std::cout<<ref_h_D[i*n + j]<<",\t";
+      }
+    }
+    return passed;
+}
 
 template <class ProblemShape, class CtaTiler,
           class TA, class AStride, class TiledCopyA,
@@ -186,21 +248,21 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
 
   clear(tCrB);
 
-  if(thread0()) {
-  // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {
-    print("Before copy_b : "); print(  copy_b); print("\n");
-    print("---- tBgB 0000 \n");
-    print_tensor(tBgB);
-    print("\n");
+  // if(thread0()) {
+  // // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {
+  //   print("Before copy_b : "); print(  copy_b); print("\n");
+  //   print("---- tBgB 0000 \n");
+  //   print_tensor(tBgB);
+  //   print("\n");
 
-    CUTE_UNROLL
-    for (int i = 0; i < cute::size(tCrB); ++i) {
-        cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
-    }
+  //   CUTE_UNROLL
+  //   for (int i = 0; i < cute::size(tCrB); ++i) {
+  //       cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
+  //   }
 
-    print("\n k_tile_count is: %d \n", k_tile_count);
+  //   print("\n k_tile_count is: %d \n", k_tile_count);
 
-  }
+  // }
 
   CUTLASS_PRAGMA_UNROLL
   for (int k_tile = 0; k_tile < k_tile_count; k_tile++, prefetch_k++) {
@@ -634,6 +696,21 @@ int main(int argc, char** argv)
       std::cout<<h_C[i*n + j]<<",\t";
     }
   }
+
+  bool passed = verify(
+    d_A,
+    d_B,
+    d_C,
+    m,
+    n,
+    k,
+    alpha,
+    beta
+  );
+  std::cout << "Disposition: " << (passed ? "Passed" : "Failed") << std::endl;
+
+  if(!passed) return -1;
+
 
 //   // Timing iterations
 //   timer.start();
