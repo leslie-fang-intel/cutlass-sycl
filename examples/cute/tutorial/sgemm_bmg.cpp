@@ -56,7 +56,7 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   // Full and Tiled Tensors
   //
 
-  auto A_shape = select<0,2,3>(shape_MNK);
+  auto A_shape = select<0,2,3>(shape_MNK);  // 4, 16, 32, 1
   auto B_shape = select<1,2,3>(shape_MNK);
   auto C_shape = select<0,1,3>(shape_MNK);
 
@@ -81,15 +81,6 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
 
   Tensor gB = local_tile(mB_coord, select<1,2>(cta_tiler), make_coord(BlockIdxY(),_,BlockIdxZ()));
 
-
-
-  if(thread0()) {
-    print("mB_coord \n");
-    print(mB_coord);
-    print("\n gB \n");
-    print(gB);
-  }
-
   //
   // Define A/B partitioning and C accumulators
   //
@@ -105,9 +96,12 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   Tensor tCgB = thr_mma.partition_B(gB);
   Tensor tCgC = thr_mma.partition_C(gC);
 
+
   if(thread0()) {
-    print("\n");
-    print(tCgB);
+    print("\n tiled_mma \n");
+    print(tiled_mma);
+    print("\n gB \n");
+    print(gB);
     print("\n");
   }
 
@@ -189,50 +183,46 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   constexpr int barrier_scope = 2;
   int k_tile_count = ceil_div(get<2>(shape_MNK), get<2>(cta_tiler));
 
+
+  clear(tCrB);
+
+  if(thread0()) {
+  // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {
+    print("Before copy_b : "); print(  copy_b); print("\n");
+    print("---- tBgB 0000 \n");
+    print_tensor(tBgB);
+    print("\n");
+
+    CUTE_UNROLL
+    for (int i = 0; i < cute::size(tCrB); ++i) {
+        cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
+    }
+
+    print("\n k_tile_count is: %d \n", k_tile_count);
+
+  }
+
   CUTLASS_PRAGMA_UNROLL
   for (int k_tile = 0; k_tile < k_tile_count; k_tile++, prefetch_k++) {
     barrier_arrive(barrier_scope);
     // Copy gmem to rmem for the first k_tile
     copy(copy_a, tAgA(_,_,_,k_tile), tArA);
-
-    // if(thread0()) {
-    //     print(" copy_b : "); print(  copy_b); print("\n");
-    //     print("---- tBgB 0000 \n");
-    //     print_tensor(tBgB);
-    //     print("\n");
-    // }
-
     copy(copy_b, tBgB(_,_,_,k_tile), tBrB);
-
-    if (prefetch_k < k_tile_count) {
-//      prefetch(prefetch_a, pAgA(_, _, _, prefetch_k));
-//      prefetch(prefetch_b, pBgB(_, _, _, prefetch_k));
-    }
 
     cute::gemm(tiled_mma, tCrA, tCrB, tCrC);
     barrier_wait(barrier_scope);
 
     if(thread0()) {
-    // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {        
-        // CUTE_UNROLL
-        // for (int i = 0; i < cute::size(tCrA); ++i) {
-        //     cute::print("thread 0, tCrA item %d, val is: %f \n", i, static_cast<float>(tCrA(i)));
-        // }
-
-        // print(" copy_b : "); print(  copy_b); print("\n");
-        // print("---- tBgB 0000 \n");
-        // print_tensor(tBgB);
-        // print("\n");
+        // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {        
+        CUTE_UNROLL
+        for (int i = 0; i < cute::size(tCrA); ++i) {
+            cute::print("thread 0, tCrA item %d, val is: %f \n", i, static_cast<float>(tCrA(i)));
+        }
 
         CUTE_UNROLL
         for (int i = 0; i < cute::size(tCrB); ++i) {
             cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
         }
-
-        // CUTE_UNROLL
-        // for (int i = 0; i < cute::size(tBrB); ++i) {
-        //     cute::print("thread 0, tBrB item %d, val is: %f \n", i, static_cast<float>(tBrB(i)));
-        // }
 
     }
 
@@ -436,7 +426,7 @@ gemm_tt(int m, int n, int k,
                                     Layout<Shape<_32,_2>>{});              // Val layout  32x2
   TiledCopy copyB = make_tiled_copy(Copy_Atom<Copy_Traits<XE_2D_U16x32x32_LD_V, decltype(dB)>, TB>{},
                                     Layout<Shape<_1,_16>>{}, // Thr layout 1x16 n-major
-                                    Layout<Shape<_32,_2>>{});              // Val layout  16x1
+                                    Layout<Shape<_32,_2>>{});              // Val layout  32x2
   TiledCopy copyC = make_tiled_copy(Copy_Atom<Copy_Traits<XE_2D_U32x8x16_ST_N, decltype(dC)>, TC>{},
                                     Layout<Shape<_1,_16>>{}, // Thr layout 1x16 n-major
                                     Layout<Shape<_8,_1>>{});              // Val layout  8x1
@@ -458,16 +448,50 @@ gemm_tt(int m, int n, int k,
 
   auto dimBlock = syclcompat::dim3(size(mmaC));
   auto dimGrid  = syclcompat::dim3(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
-  auto event = syclcompat::launch<
-      gemm_device<decltype(prob_shape), decltype(cta_tiler),
-                  TA, decltype(dA), decltype(copyA),
-                  TB, decltype(dB), decltype(copyB),
-                  TC, decltype(dC), decltype(copyC), decltype(mmaC),
-                  Alpha, Beta>>(dimGrid, dimBlock, prob_shape, cta_tiler, bP,
+  // print("\n ---- start to print thread info ---- \n");
+  // print(dimBlock.x);
+  // print(dimBlock.y);
+  // print(dimBlock.z);
+  // print(dimGrid.x);
+  // print(dimGrid.y);
+  // print(dimGrid.z);
+  // print("\n ---- finish to print thread info ---- \n");
+  // auto event = syclcompat::launch<
+  //     gemm_device<decltype(prob_shape), decltype(cta_tiler),
+  //                 TA, decltype(dA), decltype(copyA),
+  //                 TB, decltype(dB), decltype(copyB),
+  //                 TC, decltype(dC), decltype(copyC), decltype(mmaC),
+  //                 Alpha, Beta>>(dimGrid, dimBlock, prob_shape, cta_tiler, bP,
+  //                   A, dA, copyA,
+  //                   B, dB, copyB,
+  //                   C, dC, copyC, mmaC,
+  //                   alpha, beta);
+
+  // Cutlass only support simd_16
+  constexpr int SubgroupSize = 16;
+  constexpr int smem_size = 0;
+  auto kernel_props = [] {
+    return syclcompat::experimental::kernel_properties{
+      sycl::ext::oneapi::experimental::sub_group_size<SubgroupSize>
+    };
+  }();
+  syclcompat::experimental::launch_properties launch_props {
+    sycl::ext::oneapi::experimental::work_group_scratch_size(smem_size),
+  };
+  syclcompat::experimental::launch_policy policy{
+    dimGrid, dimBlock, launch_props, kernel_props
+  };
+  auto event = syclcompat::experimental::launch<
+    gemm_device<decltype(prob_shape), decltype(cta_tiler),
+                TA, decltype(dA), decltype(copyA),
+                TB, decltype(dB), decltype(copyB),
+                TC, decltype(dC), decltype(copyC), decltype(mmaC),
+                Alpha, Beta>>(policy, prob_shape, cta_tiler, bP,
                     A, dA, copyA,
                     B, dB, copyB,
                     C, dC, copyC, mmaC,
                     alpha, beta);
+
   EventManager::getInstance().addEvent(event);
 }
 
