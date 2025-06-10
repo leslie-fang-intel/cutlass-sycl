@@ -85,7 +85,7 @@ bool verify(
     bool passed = cutlass::reference::device::BlockCompareEqual(
       ref_d_C, d_C, m * n);
 
-    std::cout<<"passed is: "<<passed<<std::endl;
+    // std::cout<<"passed is: "<<passed<<std::endl;
 
     std::vector<float> ref_h_D(m*n);
     syclcompat::memcpy<float>(ref_h_D.data(), ref_d_C, m*n);
@@ -137,10 +137,11 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
 
   // Get the appropriate blocks for this thread block
   auto cta_coord = make_coord(syclcompat::work_group_id::x(), syclcompat::work_group_id::y(), 0);  // (m,n,k)
-  Tensor gA = local_tile(mA_coord, cta_tiler, cta_coord, Step<_1, X,_1>{});  // (BLK_M,BLK_K,k)
+  // Tensor gA = local_tile(mA_coord, cta_tiler, cta_coord, Step<_1, X,_1>{});  // (BLK_M,BLK_K,k)
   // Tensor gB = local_tile(mB_coord, cta_tiler, cta_coord, Step< X,_1,_1>{});  // (BLK_N,BLK_K,k)
   Tensor gC = local_tile(mC_coord, cta_tiler, cta_coord, Step<_1,_1, X>{});  // (BLK_M,BLK_N)
 
+  Tensor gA = local_tile(mA_coord, select<0,2>(cta_tiler), make_coord(BlockIdxX(),_,BlockIdxZ()));
   Tensor gB = local_tile(mB_coord, select<1,2>(cta_tiler), make_coord(BlockIdxY(),_,BlockIdxZ()));
 
   //
@@ -162,8 +163,8 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   if(thread0()) {
     print("\n tiled_mma \n");
     print(tiled_mma);
-    print("\n gB \n");
-    print(gB);
+    print("\n gA \n");
+    print(gA);
     print("\n");
   }
 
@@ -249,16 +250,11 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   clear(tCrB);
 
   // if(thread0()) {
-  // // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {
-  //   print("Before copy_b : "); print(  copy_b); print("\n");
-  //   print("---- tBgB 0000 \n");
-  //   print_tensor(tBgB);
+  // // // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {
+  //   print("Before copy_a : "); print(  copy_a); print("\n");
+  //   print("---- tAgA 0000 \n");
+  //   print_tensor(tAgA);
   //   print("\n");
-
-  //   CUTE_UNROLL
-  //   for (int i = 0; i < cute::size(tCrB); ++i) {
-  //       cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
-  //   }
 
   //   print("\n k_tile_count is: %d \n", k_tile_count);
 
@@ -274,19 +270,19 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
     cute::gemm(tiled_mma, tCrA, tCrB, tCrC);
     barrier_wait(barrier_scope);
 
-    if(thread0()) {
-        // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {        
-        CUTE_UNROLL
-        for (int i = 0; i < cute::size(tCrA); ++i) {
-            cute::print("thread 0, tCrA item %d, val is: %f \n", i, static_cast<float>(tCrA(i)));
-        }
+    // if(thread0()) {
+    //     // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {        
+    //     CUTE_UNROLL
+    //     for (int i = 0; i < cute::size(tCrA); ++i) {
+    //         cute::print("thread 0, tCrA item %d, val is: %f \n", i, static_cast<float>(tCrA(i)));
+    //     }
 
-        CUTE_UNROLL
-        for (int i = 0; i < cute::size(tCrB); ++i) {
-            cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
-        }
+    //     CUTE_UNROLL
+    //     for (int i = 0; i < cute::size(tCrB); ++i) {
+    //         cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
+    //     }
 
-    }
+    // }
 
   }
 
@@ -590,7 +586,7 @@ int main(int argc, char** argv)
   if (argc >= 3)
     sscanf(argv[2], "%d", &n);
 
-  int k = 32;
+  int k = 64;
   if (argc >= 4)
     sscanf(argv[3], "%d", &k);
 
@@ -621,6 +617,8 @@ int main(int argc, char** argv)
 
   // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( 2*(rand() / double(RAND_MAX)) - 1 );
   // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( 2*(rand() / double(RAND_MAX)) - 1 );
+  // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( (rand()%21) - 10 );
+  // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( (rand()%21) - 10 );
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<TC>(-1);
 
   std::cout<<"\n ---- print matrix A"<<std::endl;
@@ -686,7 +684,6 @@ int main(int argc, char** argv)
        d_C, ldC);
   syclcompat::wait_and_throw();
 
-
   syclcompat::memcpy<TC>(h_C.data(), d_C, m*n);
   syclcompat::wait_and_throw();
   std::cout<<"\n ---- print matrix C"<<std::endl;
@@ -707,7 +704,7 @@ int main(int argc, char** argv)
     alpha,
     beta
   );
-  std::cout << "Disposition: " << (passed ? "Passed" : "Failed") << std::endl;
+  std::cout << "\n Disposition: " << (passed ? "Passed" : "Failed") << std::endl;
 
   if(!passed) return -1;
 
