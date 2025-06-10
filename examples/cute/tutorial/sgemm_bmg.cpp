@@ -58,21 +58,38 @@ bool verify(
 ) {
   auto ref_d_C = syclcompat::malloc<TC>(m*n);
   cutlass::TensorRef ref_A(d_A, cutlass::layout::RowMajor::packed({m, k}));
-  if (transB == 'N') {
-    cutlass::TensorRef ref_B(d_B, cutlass::layout::ColumnMajor::packed({k, n}));
-  } else {
-    cutlass::TensorRef ref_B(d_B, cutlass::layout::RowMajor::packed({k, n}));
-  }
+  
+  cutlass::TensorRef ref_B_N(d_B, cutlass::layout::ColumnMajor::packed({k, n}));
+  cutlass::TensorRef ref_B_T(d_B, cutlass::layout::RowMajor::packed({k, n}));
 
   cutlass::TensorRef ref_C(ref_d_C, cutlass::layout::RowMajor::packed({m, n}));
   cutlass::TensorRef ref_D(ref_d_C, cutlass::layout::RowMajor::packed({m, n}));
 
-  cutlass::reference::device::GemmComplex(
+  if (transB == 'N') {
+    cutlass::reference::device::GemmComplex(
+          {m, n, k},
+          alpha,
+          ref_A,
+          cutlass::ComplexTransform::kNone,
+          ref_B_N,
+          cutlass::ComplexTransform::kNone,
+          beta,
+          ref_C,
+          ref_D,
+          float(0),  // accumulator
+          1,     // batch_count
+          m * k, // batch_stride_A
+          k * n, // batch_stride_B
+          m * n, // batch_stride_C
+          m * n  // batch_stride_D
+        );
+  } else {
+      cutlass::reference::device::GemmComplex(
         {m, n, k},
         alpha,
         ref_A,
         cutlass::ComplexTransform::kNone,
-        ref_B,
+        ref_B_T,
         cutlass::ComplexTransform::kNone,
         beta,
         ref_C,
@@ -84,28 +101,30 @@ bool verify(
         m * n, // batch_stride_C
         m * n  // batch_stride_D
       );
+  }
 
-    // CUTLASS on SYCL uses the compatibility library syclcompat for e.g. default in-order queue
-    syclcompat::wait();
 
-    // Check if output from CUTLASS kernel and reference kernel are equal or not
-    bool passed = cutlass::reference::device::BlockCompareEqual(
-      ref_d_C, d_C, m * n);
+  // CUTLASS on SYCL uses the compatibility library syclcompat for e.g. default in-order queue
+  syclcompat::wait();
 
-    // std::cout<<"passed is: "<<passed<<std::endl;
+  // Check if output from CUTLASS kernel and reference kernel are equal or not
+  bool passed = cutlass::reference::device::BlockCompareEqual(
+    ref_d_C, d_C, m * n);
 
-    // std::vector<float> ref_h_D(m*n);
-    // syclcompat::memcpy<float>(ref_h_D.data(), ref_d_C, m*n);
-    // syclcompat::wait_and_throw();
-    // std::cout<<"\n ---- print matrix ref_h_D"<<std::endl;
-    // for (int i = 0; i < m; ++i) {
-    //   std::cout<<"\n"<<std::endl;
-    //   for (int j = 0; j < n; ++j) {
-    //     std::cout<<ref_h_D[i*n + j]<<",\t";
-    //   }
-    // }
+  // std::cout<<"passed is: "<<passed<<std::endl;
 
-    return passed;
+  // std::vector<float> ref_h_D(m*n);
+  // syclcompat::memcpy<float>(ref_h_D.data(), ref_d_C, m*n);
+  // syclcompat::wait_and_throw();
+  // std::cout<<"\n ---- print matrix ref_h_D"<<std::endl;
+  // for (int i = 0; i < m; ++i) {
+  //   std::cout<<"\n"<<std::endl;
+  //   for (int j = 0; j < n; ++j) {
+  //     std::cout<<ref_h_D[i*n + j]<<",\t";
+  //   }
+  // }
+
+  return passed;
 }
 
 template <class ProblemShape, class CtaTiler,
@@ -658,7 +677,7 @@ int main(int argc, char** argv)
   if (argc >= 5)
     sscanf(argv[4], "%c", &transA);
 
-  char transB = 'N';
+  char transB = 'T';
   if (argc >= 6)
     sscanf(argv[5], "%c", &transB);
 
@@ -682,54 +701,54 @@ int main(int argc, char** argv)
   // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( 2*(rand() / double(RAND_MAX)) - 1 );
   // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( 2*(rand() / double(RAND_MAX)) - 1 );
   
-  // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( (rand()%21) - 10 );
-  // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( (rand()%21) - 10 );
+  for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( (rand()%21) - 10 );
+  for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( (rand()%21) - 10 );
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<TC>(-1);
 
-  std::cout<<"\n ---- print matrix A"<<std::endl;
-  if (transA == 'N') {
-    // h_A[i*k + j] = static_cast<TA>( a_val );
-    int a_val = 0;
-    for (int i = 0; i < m; ++i) {
-      std::cout<<"\n"<<std::endl;
-      for (int j = 0; j < k; ++j) {
-        h_A[j*m + i] = static_cast<TA>(a_val);
-        std::cout<<h_A[j*m + i]<<",\t";
-        ++a_val;
-      }
-    }
-  } else {
-    for (int i = 0; i < m; ++i) {
-      std::cout<<"\n"<<std::endl;
-      for (int j = 0; j < k; ++j) {
-        h_A[i*k + j] = static_cast<TA>(i*k + j);
-        std::cout<<h_A[i*k + j]<<",\t";
-      }
-    }
-  }
+  // std::cout<<"\n ---- print matrix A"<<std::endl;
+  // if (transA == 'N') {
+  //   // h_A[i*k + j] = static_cast<TA>( a_val );
+  //   int a_val = 0;
+  //   for (int i = 0; i < m; ++i) {
+  //     std::cout<<"\n"<<std::endl;
+  //     for (int j = 0; j < k; ++j) {
+  //       h_A[j*m + i] = static_cast<TA>(a_val);
+  //       std::cout<<h_A[j*m + i]<<",\t";
+  //       ++a_val;
+  //     }
+  //   }
+  // } else {
+  //   for (int i = 0; i < m; ++i) {
+  //     std::cout<<"\n"<<std::endl;
+  //     for (int j = 0; j < k; ++j) {
+  //       h_A[i*k + j] = static_cast<TA>(i*k + j);
+  //       std::cout<<h_A[i*k + j]<<",\t";
+  //     }
+  //   }
+  // }
 
 
-  std::cout<<"\n ---- print matrix B"<<std::endl;
-  if (transB == 'N') {
-    int b_val = 0;
-    for (int i = 0; i < k; ++i) {
-      std::cout<<"\n"<<std::endl;
-      for (int j = 0; j < n; ++j) {
-        h_B[j*k + i] = static_cast<TB>( b_val );
-        std::cout<<h_B[j*k + i]<<",\t";
-        ++b_val;
-      }
-    }
+  // std::cout<<"\n ---- print matrix B"<<std::endl;
+  // if (transB == 'N') {
+  //   int b_val = 0;
+  //   for (int i = 0; i < k; ++i) {
+  //     std::cout<<"\n"<<std::endl;
+  //     for (int j = 0; j < n; ++j) {
+  //       h_B[j*k + i] = static_cast<TB>( b_val );
+  //       std::cout<<h_B[j*k + i]<<",\t";
+  //       ++b_val;
+  //     }
+  //   }
 
-  } else {
-    for (int i = 0; i < k; ++i) {
-      std::cout<<"\n"<<std::endl;
-      for (int j = 0; j < n; ++j) {
-        h_B[i*n + j] = static_cast<TB>( i*n + j );
-        std::cout<<h_B[i*n + j]<<",\t";
-      }
-    }
-  }
+  // } else {
+  //   for (int i = 0; i < k; ++i) {
+  //     std::cout<<"\n"<<std::endl;
+  //     for (int j = 0; j < n; ++j) {
+  //       h_B[i*n + j] = static_cast<TB>( i*n + j );
+  //       std::cout<<h_B[i*n + j]<<",\t";
+  //     }
+  //   }
+  // }
 
   auto d_A = syclcompat::malloc<TA>(m*k);
   auto d_B = syclcompat::malloc<TB>(k*n);
@@ -776,15 +795,15 @@ int main(int argc, char** argv)
        d_C, ldC);
   syclcompat::wait_and_throw();
 
-  syclcompat::memcpy<TC>(h_C.data(), d_C, m*n);
-  syclcompat::wait_and_throw();
-  std::cout<<"\n ---- print matrix C"<<std::endl;
-  for (int i = 0; i < m; ++i) {
-    std::cout<<"\n"<<std::endl;
-    for (int j = 0; j < n; ++j) {
-      std::cout<<h_C[i*n + j]<<",\t";
-    }
-  }
+  // syclcompat::memcpy<TC>(h_C.data(), d_C, m*n);
+  // syclcompat::wait_and_throw();
+  // std::cout<<"\n ---- print matrix C"<<std::endl;
+  // for (int i = 0; i < m; ++i) {
+  //   std::cout<<"\n"<<std::endl;
+  //   for (int j = 0; j < n; ++j) {
+  //     std::cout<<h_C[i*n + j]<<",\t";
+  //   }
+  // }
 
   bool passed = verify(
     d_A,
