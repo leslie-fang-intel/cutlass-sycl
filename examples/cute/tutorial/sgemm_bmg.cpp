@@ -52,11 +52,18 @@ bool verify(
   int n,
   int k,
   Alpha alpha,
-  Beta beta
+  Beta beta,
+  char transA,
+  char transB
 ) {
   auto ref_d_C = syclcompat::malloc<TC>(m*n);
   cutlass::TensorRef ref_A(d_A, cutlass::layout::RowMajor::packed({m, k}));
-  cutlass::TensorRef ref_B(d_B, cutlass::layout::RowMajor::packed({k, n}));
+  if (transB == 'N') {
+    cutlass::TensorRef ref_B(d_B, cutlass::layout::ColumnMajor::packed({k, n}));
+  } else {
+    cutlass::TensorRef ref_B(d_B, cutlass::layout::RowMajor::packed({k, n}));
+  }
+
   cutlass::TensorRef ref_C(ref_d_C, cutlass::layout::RowMajor::packed({m, n}));
   cutlass::TensorRef ref_D(ref_d_C, cutlass::layout::RowMajor::packed({m, n}));
 
@@ -424,7 +431,8 @@ gemm_tn(int m, int n, int k,
   // Define TN strides (mixed)
   auto dA = make_stride(ldA, Int<1>{}, Int<0>{});                      // (dM, dK)
   auto dB = make_stride(ldB, Int<1>{}, Int<0>{});                      // (dN, dK)
-  auto dC = make_stride(Int<1>{}, ldC, Int<0>{});                      // (dM, dN)
+  // auto dC = make_stride(Int<1>{}, ldC, Int<0>{});                      // (dM, dN)
+  auto dC = make_stride(ldC, Int<1>{}, Int<0>{});   
 
   // Define CTA tile sizes (static)
   auto bM = Int<256>{};
@@ -646,11 +654,11 @@ int main(int argc, char** argv)
   if (argc >= 4)
     sscanf(argv[3], "%d", &k);
 
-  char transA = 'N';
+  char transA = 'T';
   if (argc >= 5)
     sscanf(argv[4], "%c", &transA);
 
-  char transB = 'T';
+  char transB = 'N';
   if (argc >= 6)
     sscanf(argv[5], "%c", &transB);
 
@@ -702,7 +710,7 @@ int main(int argc, char** argv)
 
 
   std::cout<<"\n ---- print matrix B"<<std::endl;
-  if (transA == 'N') {
+  if (transB == 'N') {
     int b_val = 0;
     for (int i = 0; i < k; ++i) {
       std::cout<<"\n"<<std::endl;
@@ -786,7 +794,9 @@ int main(int argc, char** argv)
     n,
     k,
     alpha,
-    beta
+    beta,
+    transA,
+    transB
   );
   std::cout << "\n Disposition: " << (passed ? "Passed" : "Failed") << std::endl;
 
