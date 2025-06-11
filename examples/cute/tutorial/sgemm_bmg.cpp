@@ -57,50 +57,71 @@ bool verify(
   char transB
 ) {
   auto ref_d_C = syclcompat::malloc<TC>(m*n);
-  cutlass::TensorRef ref_A(d_A, cutlass::layout::RowMajor::packed({m, k}));
+  cutlass::TensorRef ref_A_T(d_A, cutlass::layout::RowMajor::packed({m, k}));
+  cutlass::TensorRef ref_A_N(d_A, cutlass::layout::ColumnMajor::packed({m, k}));
   
-  cutlass::TensorRef ref_B_N(d_B, cutlass::layout::ColumnMajor::packed({k, n}));
   cutlass::TensorRef ref_B_T(d_B, cutlass::layout::RowMajor::packed({k, n}));
+  cutlass::TensorRef ref_B_N(d_B, cutlass::layout::ColumnMajor::packed({k, n}));
 
   cutlass::TensorRef ref_C(ref_d_C, cutlass::layout::RowMajor::packed({m, n}));
   cutlass::TensorRef ref_D(ref_d_C, cutlass::layout::RowMajor::packed({m, n}));
 
-  if (transB == 'N') {
+  if (transA == 'T' && transB == 'N') {
     cutlass::reference::device::GemmComplex(
-          {m, n, k},
-          alpha,
-          ref_A,
-          cutlass::ComplexTransform::kNone,
-          ref_B_N,
-          cutlass::ComplexTransform::kNone,
-          beta,
-          ref_C,
-          ref_D,
-          float(0),  // accumulator
-          1,     // batch_count
-          m * k, // batch_stride_A
-          k * n, // batch_stride_B
-          m * n, // batch_stride_C
-          m * n  // batch_stride_D
-        );
+      {m, n, k},
+      alpha,
+      ref_A_T,
+      cutlass::ComplexTransform::kNone,
+      ref_B_N,
+      cutlass::ComplexTransform::kNone,
+      beta,
+      ref_C,
+      ref_D,
+      float(0),  // accumulator
+      1,     // batch_count
+      m * k, // batch_stride_A
+      k * n, // batch_stride_B
+      m * n, // batch_stride_C
+      m * n  // batch_stride_D
+    );
+  } else if (transA == 'T' && transB == 'T') {
+    cutlass::reference::device::GemmComplex(
+      {m, n, k},
+      alpha,
+      ref_A_T,
+      cutlass::ComplexTransform::kNone,
+      ref_B_T,
+      cutlass::ComplexTransform::kNone,
+      beta,
+      ref_C,
+      ref_D,
+      float(0),  // accumulator
+      1,     // batch_count
+      m * k, // batch_stride_A
+      k * n, // batch_stride_B
+      m * n, // batch_stride_C
+      m * n  // batch_stride_D
+    );
+  } else if (transA == 'N' && transB == 'T') {
+    cutlass::reference::device::GemmComplex(
+      {m, n, k},
+      alpha,
+      ref_A_N,
+      cutlass::ComplexTransform::kNone,
+      ref_B_T,
+      cutlass::ComplexTransform::kNone,
+      beta,
+      ref_C,
+      ref_D,
+      float(0),  // accumulator
+      1,     // batch_count
+      m * k, // batch_stride_A
+      k * n, // batch_stride_B
+      m * n, // batch_stride_C
+      m * n  // batch_stride_D
+    );
   } else {
-      cutlass::reference::device::GemmComplex(
-        {m, n, k},
-        alpha,
-        ref_A,
-        cutlass::ComplexTransform::kNone,
-        ref_B_T,
-        cutlass::ComplexTransform::kNone,
-        beta,
-        ref_C,
-        ref_D,
-        float(0),  // accumulator
-        1,     // batch_count
-        m * k, // batch_stride_A
-        k * n, // batch_stride_B
-        m * n, // batch_stride_C
-        m * n  // batch_stride_D
-      );
+    assert(false && "Not implemented");
   }
 
 
@@ -154,7 +175,7 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   auto mB = make_tensor(make_gmem_ptr(B), make_layout(B_shape, dB));
   auto mC = make_tensor(make_gmem_ptr(C), make_layout(C_shape, dC));
 
-  auto copy_a = TiledCopyA{mA};
+  auto copy_a = TiledCopyA{mA};  
   auto copy_b = TiledCopyB{mB};
   auto copy_c = TiledCopyC{mC};
 
@@ -168,8 +189,8 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   // Tensor gB = local_tile(mB_coord, cta_tiler, cta_coord, Step< X,_1,_1>{});  // (BLK_N,BLK_K,k)
   Tensor gC = local_tile(mC_coord, cta_tiler, cta_coord, Step<_1,_1, X>{});  // (BLK_M,BLK_N)
 
-  Tensor gA = local_tile(mA_coord, select<0,2>(cta_tiler), make_coord(BlockIdxX(),_,BlockIdxZ()));
-  Tensor gB = local_tile(mB_coord, select<1,2>(cta_tiler), make_coord(BlockIdxY(),_,BlockIdxZ()));
+  Tensor gA = local_tile(mA_coord, select<0,2>(cta_tiler), make_coord(BlockIdxX(),_,BlockIdxZ()));  // (BLK_M,BLK_K,k)
+  Tensor gB = local_tile(mB_coord, select<1,2>(cta_tiler), make_coord(BlockIdxY(),_,BlockIdxZ()));  // (BLK_N,BLK_K,k)
 
   //
   // Define A/B partitioning and C accumulators
@@ -187,15 +208,11 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   Tensor tCgC = thr_mma.partition_C(gC);
 
 
-  if(thread0()) {
-    print("\n tiled_mma \n");
-    print(tiled_mma);
-    print("\n gA \n");
-    print(gA);
-    print("\n tCgA \n");
-    print(tCgA);
-    print("\n");
-  }
+  // if(thread0()) {
+  //   print("\n tiled_mma \n"); print(tiled_mma); print("\n");
+
+  //   print("\n gA \n"); print(gA); print("\n");
+  // }
 
   Tensor tCrA = make_tensor<TA>(make_fragment_layout(copy_a, tCgA(_,_,_,0).shape()));
   Tensor tCrB = make_tensor<TB>(make_fragment_layout(copy_b, tCgB(_,_,_,0).shape()));
@@ -278,19 +295,14 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
 
   clear(tCrB);
 
-  if(thread0()) {
-  // // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {
-    print("Before copy_a : "); print(  copy_a); print("\n");
-    print("\n ---- tAgA \n");
-    print_tensor(tAgA);
-    print("\n");
+  // if(thread0()) {
+  // // // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {
+  //   print("\n Before copy_a : \n"); print(  copy_a); print("\n");
 
-    print("\n k_tile_count is: %d \n", k_tile_count);
+  //   print("\n ---- tAgA \n"); print_tensor(tAgA); print("\n");
 
-    print("\n ---- tArA ---- \n");
-    print(tArA);
-    print("\n");
-  }
+  //   print("\n k_tile_count is: %d \n", k_tile_count);
+  // }
 
   CUTLASS_PRAGMA_UNROLL
   for (int k_tile = 0; k_tile < k_tile_count; k_tile++, prefetch_k++) {
@@ -302,18 +314,18 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
     cute::gemm(tiled_mma, tCrA, tCrB, tCrC);
     barrier_wait(barrier_scope);
 
-    if(thread0()) {
-        // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {   
-        CUTE_UNROLL
-        for (int i = 0; i < cute::size(tCrA); ++i) {
-            cute::print("thread 0, tCrA item %d, val is: %f \n", i, static_cast<float>(tCrA(i)));
-        }
+    // if(thread0()) {
+    //     // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {   
+    //     CUTE_UNROLL
+    //     for (int i = 0; i < cute::size(tCrA); ++i) {
+    //         cute::print("thread 0, tCrA item %d, val is: %f \n", i, static_cast<float>(tCrA(i)));
+    //     }
 
-        CUTE_UNROLL
-        for (int i = 0; i < cute::size(tCrB); ++i) {
-            cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
-        }
-    }
+    //     CUTE_UNROLL
+    //     for (int i = 0; i < cute::size(tCrB); ++i) {
+    //         cute::print("thread 0, tCrB item %d, val is: %f \n", i, static_cast<float>(tCrB(i)));
+    //     }
+    // }
 
   }
 
@@ -337,6 +349,8 @@ gemm_nt(int m, int n, int k,
         Beta beta,
         TC      * C, int ldC)
 {
+  std::cout<<"---- hit the gemm_nt ----"<<std::endl;
+
   using namespace cute;
 
   // Define shapes (dynamic)
@@ -348,7 +362,6 @@ gemm_nt(int m, int n, int k,
 
   // Define NT strides (mixed)
   auto dA = make_stride(Int<1>{}, ldA);                      // (dM, dK)
-  // auto dA = make_stride(ldA, Int<1>{});                      // (dM, dK)
   auto dB = make_stride(Int<1>{}, ldB);                      // (dN, dK)
   auto dC = make_stride(ldC, Int<1>{});                      // (dM, dN)
 
@@ -361,9 +374,14 @@ gemm_nt(int m, int n, int k,
 
   // Define the thread layouts (static)
 
+  // TiledCopy copyA = make_tiled_copy(Copy_Atom<Copy_Traits<XE_2D_U16x16x8_LD_T, decltype(dA)>, TA>{},
+  //                                   Layout<Shape<_1,_16>>{}, // Thr layout 1x16 k-major
+  //                                   Layout<Shape<_8,_1>>{});              // Val layout  32x2
+                                  
   TiledCopy copyA = make_tiled_copy(Copy_Atom<Copy_Traits<XE_2D_U16x16x16_LD_T, decltype(dA)>, TA>{},
                                     Layout<Shape<_1,_16>>{}, // Thr layout 1x16 k-major
                                     Layout<Shape<_16,_1>>{});              // Val layout  32x2
+
   TiledCopy copyB = make_tiled_copy(Copy_Atom<Copy_Traits<XE_2D_U16x32x32_LD_V, decltype(dB)>, TB>{},
                                     Layout<Shape<_1,_16>>{}, // Thr layout 1x16 n-major
                                     Layout<Shape<_32,_2>>{});              // Val layout  16x1
@@ -661,15 +679,19 @@ gemm(char transA, char transB, int m, int n, int k,
 
 int main(int argc, char** argv)
 {
-  int m = 4;
+  // 8x16x32
+  // 8x16x64
+  // 8192x8192x64
+  // 8192x8192x8192
+  int m = 8192;
   if (argc >= 2)
     sscanf(argv[1], "%d", &m);
 
-  int n = 16;
+  int n = 8192;
   if (argc >= 3)
     sscanf(argv[2], "%d", &n);
 
-  int k = 32;
+  int k = 8192;
   if (argc >= 4)
     sscanf(argv[3], "%d", &k);
 
