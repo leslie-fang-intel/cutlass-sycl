@@ -308,8 +308,8 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   constexpr int barrier_scope = 2;
   int k_tile_count = ceil_div(get<2>(shape_MNK), get<2>(cta_tiler));
 
-
-  clear(tCrB);
+  // Clear tCrB seems hurt perf heavily
+  // clear(tCrB);
 
   // if(thread0()) {
   // // // if (((syclcompat::global_id::x() == 1) && !syclcompat::global_id::y() && !syclcompat::global_id::z())) {
