@@ -232,23 +232,39 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   // PREFETCH
   //
 
-  constexpr int Num_SGs = size(tiled_mma);
-//  auto prefetch_a = cute::prefetch_selector<select<0,2>(cta_tiler), Num_SGs>(copy_a);
-//  auto prefetch_b = cute::prefetch_selector<select<1,2>(cta_tiler), Num_SGs>(copy_b);
-//  auto thr_prefetch_A = prefetch_a.get_slice(syclcompat::local_id::x());
-//  auto thr_prefetch_B = prefetch_b.get_slice(syclcompat::local_id::x());
+  // constexpr int Num_SGs = size(tiled_mma);
+  static constexpr auto ATOM_M = get<1>(typename TiledMma::ThrLayoutVMNK{}.shape());
+  static constexpr auto ATOM_N = get<2>(typename TiledMma::ThrLayoutVMNK{}.shape());
+  static constexpr auto ATOM_K = get<3>(typename TiledMma::ThrLayoutVMNK{}.shape());
+  static constexpr auto Num_SGs = ATOM_N * ATOM_M * ATOM_K;
+
+  static constexpr auto BLK_M = get<0>(CtaTiler{});
+  static constexpr auto BLK_N = get<1>(CtaTiler{});
+  static constexpr auto BLK_K = get<2>(CtaTiler{});
+  
+  // if(thread0()) {
+  //   print("\n --BLK_M-- \n"); print(BLK_M); print("\n");
+  //   print("\n --BLK_N-- \n"); print(BLK_N); print("\n");
+  //   print("\n --BLK_K-- \n"); print(BLK_K); print("\n");
+  //   print("\n --Num_SGs-- \n"); print(Num_SGs); print("\n");
+  //   print("\n --copy_a-- \n"); print(copy_a); print("\n");
+  //   print("\n --copy_b-- \n"); print(copy_b); print("\n");
+  // }
+  auto prefetch_a = cute::prefetch_selector<Shape<Int<BLK_M>,Int<BLK_K>>, Num_SGs>(copy_a);
+  auto prefetch_b = cute::prefetch_selector<Shape<Int<BLK_N>,Int<BLK_K>>, Num_SGs>(copy_b);
+  int thread_idx = int(ThreadIdxX());
+  auto thr_prefetch_A = prefetch_a.get_slice(thread_idx);
+  auto thr_prefetch_B = prefetch_b.get_slice(thread_idx);
 
   // Partition global tile for prefetch
-//  auto pAgA = thr_prefetch_A.partition_S(gA);
-//  auto pBgB = thr_prefetch_B.partition_S(gB);
+  auto pAgA = thr_prefetch_A.partition_S(gA);
+  auto pBgB = thr_prefetch_B.partition_S(gB);
 
   int prefetch_k = 0;
 
-  CUTE_UNROLL
-  for (; prefetch_k < stages; prefetch_k++) {
-//    prefetch(prefetch_a, pAgA(_, _, _, prefetch_k));
-//    prefetch(prefetch_b, pBgB(_, _, _, prefetch_k));
-  }
+  // if(thread0()) {
+  //   print("\n --DispatchPolicy::Stages-- \n"); print(stages); print("\n");
+  // }
 
   // Clear the accumulators
   Tensor tCrC = partition_fragment_C(tiled_mma, take<0,2>(cta_tiler));
@@ -305,11 +321,22 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler, int stages,
   // }
 
   CUTLASS_PRAGMA_UNROLL
+  for (; prefetch_k < stages; prefetch_k++) {
+    prefetch(prefetch_a, pAgA(_, _, _, prefetch_k));
+    prefetch(prefetch_b, pBgB(_, _, _, prefetch_k));
+  }
+
+  CUTLASS_PRAGMA_UNROLL
   for (int k_tile = 0; k_tile < k_tile_count; k_tile++, prefetch_k++) {
     barrier_arrive(barrier_scope);
     // Copy gmem to rmem for the first k_tile
     copy(copy_a, tAgA(_,_,_,k_tile), tArA);
     copy(copy_b, tBgB(_,_,_,k_tile), tBrB);
+
+    if (prefetch_k < k_tile_count) {
+      prefetch(prefetch_a, pAgA(_, _, _, prefetch_k));
+      prefetch(prefetch_b, pBgB(_, _, _, prefetch_k));
+    }
 
     cute::gemm(tiled_mma, tCrA, tCrB, tCrC);
     barrier_wait(barrier_scope);
