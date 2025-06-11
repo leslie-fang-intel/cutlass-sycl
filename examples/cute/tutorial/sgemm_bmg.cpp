@@ -349,7 +349,7 @@ gemm_nt(int m, int n, int k,
         Beta beta,
         TC      * C, int ldC)
 {
-  std::cout<<"---- hit the gemm_nt ----"<<std::endl;
+  // std::cout<<"---- hit the gemm_nt ----"<<std::endl;
 
   using namespace cute;
 
@@ -555,7 +555,7 @@ gemm_tt(int m, int n, int k,
         TC      * C, int ldC)
 {
 
-  std::cout<<"---- hit the gemm_tt ----"<<std::endl;
+  // std::cout<<"---- hit the gemm_tt ----"<<std::endl;
 
   using namespace cute;
 
@@ -780,11 +780,6 @@ int main(int argc, char** argv)
   syclcompat::memcpy<TB>(d_B, h_B.data(), k*n);
   syclcompat::memcpy<TC>(d_C, h_C.data(), m*n);
 
-  double gflops = (2.0*m*n*k) * 1e-9;
-
-  const int timing_iterations = 100;
-  GPU_Clock timer;
-
   int ldA = 0, ldB = 0, ldC = m;
 
   if (transA == 'N') {
@@ -843,19 +838,24 @@ int main(int argc, char** argv)
 
   if(!passed) return -1;
 
+  double tflops = (2.0*m*n*k) * 1e-12;
 
-//   // Timing iterations
-//   timer.start();
-//   for (int i = 0; i < timing_iterations; ++i) {
-//     gemm(transA, transB, m, n, k,
-//          alpha,
-//          d_A, ldA,
-//          d_B, ldB,
-//          beta,
-//          d_C, ldC);
-//   }
-//   double cute_time = timer.seconds() / timing_iterations;
-//   printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
+  const int timing_iterations = 100;
+  GPU_Clock timer;
+
+  // Timing iterations
+  timer.start();
+  for (int i = 0; i < timing_iterations; ++i) {
+    gemm(transA, transB, m, n, k,
+         alpha,
+         d_A, ldA,
+         d_B, ldB,
+         beta,
+         d_C, ldC);
+  }
+  syclcompat::wait();
+  double cute_time = timer.seconds() / timing_iterations;
+  printf("CUTE_GEMM:     [%4.3f]TFlop/s  (%6.4f)ms\n", tflops / cute_time, cute_time*1000);
 
   return 0;
 }
